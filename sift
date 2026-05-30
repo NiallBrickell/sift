@@ -1,0 +1,125 @@
+#!/bin/bash
+# sift — sift RAW+JPG shoots fast, the lazy way.
+#
+# Shoot RAW+JPG, flick through the fast JPGs in Preview, delete the duds,
+# then let sift bin the orphaned RAWs whose JPG you threw away.
+#
+#   sift open [dir]          open every JPG in one Preview window (chrono order)
+#   sift tidy [dir] [--dry]  move every orphaned RAW (its JPG is gone) to Trash
+#                            --dry just lists them, changes nothing
+#
+# Default dir is the current folder. macOS only (uses Preview + Finder Trash).
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+sift — sift RAW+JPG shoots fast
+
+  sift open [dir]          open every JPG in one Preview window (chrono order)
+  sift tidy [dir] [--dry]  trash every RAW whose matching JPG you deleted
+                           --dry just lists them, changes nothing
+
+Workflow: `sift open`, delete the duds in Preview with ⌘⌫, close Preview,
+then `sift tidy`. Default dir is the current folder.
+EOF
+}
+
+# RAW formats worth knowing about (Sony, Canon, Nikon, Fuji, Olympus,
+# Panasonic, Pentax, Samsung, Adobe). Add your own if your camera differs.
+RAW_EXTS=(arw cr2 cr3 nef nrw raf orf rw2 dng srw pef raw 3fr)
+
+cmd="${1:-}"
+shift || true
+
+dir="."
+dry=false
+for a in "$@"; do
+  case "$a" in
+    --dry) dry=true ;;
+    -*)    echo "unknown flag: $a" >&2; exit 1 ;;
+    *)     dir="$a" ;;
+  esac
+done
+
+case "$cmd" in
+  open)
+    cd "$dir" 2>/dev/null || { echo "No such folder: $dir" >&2; exit 1; }
+    shopt -s nullglob nocaseglob
+    jpgs=( *.jpg *.jpeg )           # glob output is already name-sorted
+    shopt -u nullglob nocaseglob
+    if [ ${#jpgs[@]} -eq 0 ]; then
+      echo "No JPGs in $(pwd)."
+      exit 1
+    fi
+    echo "Opening ${#jpgs[@]} JPGs in Preview…"
+    open -a Preview "${jpgs[@]}"
+    ;;
+
+  tidy)
+    cd "$dir" 2>/dev/null || { echo "No such folder: $dir" >&2; exit 1; }
+    shopt -s nullglob nocaseglob
+    raws=()
+    for e in "${RAW_EXTS[@]}"; do raws+=( *."$e" ); done   # unquoted glob expands here
+    shopt -u nullglob nocaseglob
+
+    if [ ${#raws[@]} -eq 0 ]; then
+      echo "No RAW files in $(pwd)."
+      exit 0
+    fi
+
+    orphans=()
+    for raw in "${raws[@]}"; do
+      base="${raw%.*}"
+      keep=false
+      for ext in jpg JPG jpeg JPEG; do
+        [ -f "$base.$ext" ] && { keep=true; break; }
+      done
+      $keep || orphans+=( "$raw" )
+    done
+
+    if [ ${#orphans[@]} -eq 0 ]; then
+      echo "Nothing to tidy — every RAW still has a JPG."
+      exit 0
+    fi
+
+    echo "Orphaned RAWs (JPG deleted): ${#orphans[@]} of ${#raws[@]}"
+    printf '  %s\n' "${orphans[@]}"
+
+    if $dry; then
+      echo "(dry run — nothing moved)"
+      exit 0
+    fi
+
+    read -r -p "Move these ${#orphans[@]} files to Trash? [y/N] " ans
+    case "$ans" in
+      y|Y) ;;
+      *) echo "Aborted."; exit 1 ;;
+    esac
+
+    paths=()
+    for f in "${orphans[@]}"; do paths+=( "$PWD/$f" ); done
+
+    osascript - "${paths[@]}" <<'APPLESCRIPT'
+on run argv
+  set theList to {}
+  repeat with p in argv
+    set end of theList to (POSIX file (p as text))
+  end repeat
+  tell application "Finder" to delete theList
+end run
+APPLESCRIPT
+
+    echo "Moved ${#orphans[@]} RAWs to Trash."
+    ;;
+
+  ""|-h|--help|help)
+    usage
+    ;;
+
+  *)
+    echo "unknown command: $cmd" >&2
+    usage
+    exit 1
+    ;;
+esac
